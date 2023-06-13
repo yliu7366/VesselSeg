@@ -1,0 +1,263 @@
+#include <time.h>
+#include <iostream>
+#include <string>
+#include <limits>
+#include <cmath>
+
+#include "itkImage.h"
+#include "itkImageFileReader.h"
+#include "itkImageFileWriter.h"
+#include "itkVotingBinaryIterativeHoleFillingImageFilter.h"
+#include "itkBinaryThresholdImageFilter.h"
+#include "itkSignedMaurerDistanceMapImageFilter.h"
+#include "itkHessianToObjectnessMeasureImageFilter.h"
+#include "itkMultiScaleHessianBasedMeasureImageFilter.h"
+#include "itkSymmetricSecondRankTensor.h"
+
+//not in ITK
+#include "itkBinaryThinningImageFilter3D.h"
+
+
+// our stuff
+#include "CenterlineGraphConverter.h"
+#include "VesselGraph.h"
+#include "VesselSegment.h"
+#include "VesselNode.h"
+#include "FixedArray.h"
+
+const unsigned int Dimension = 3;
+typedef unsigned int LabelType;
+typedef double RealType;
+typedef double InputPixelType;
+typedef itk::Image< InputPixelType, Dimension > InputImageType;
+typedef double OutputPixelType;
+typedef itk::Image< OutputPixelType, Dimension > OutputImageType;
+typedef itk::Image< LabelType, Dimension > LabelImageType;
+typedef itk::SymmetricSecondRankTensor< RealType, Dimension > RealSymmetricMatrixType;
+typedef itk::Image< RealSymmetricMatrixType, Dimension > RealSymmetricMatrixImageType;
+    
+typedef itk::HessianToObjectnessMeasureImageFilter<RealSymmetricMatrixImageType, OutputImageType> ObjectnessFilterType;
+typedef itk::MultiScaleHessianBasedMeasureImageFilter<OutputImageType, RealSymmetricMatrixImageType, OutputImageType > MultiScaleEnhancementFilterType;   
+typedef itk::BinaryThresholdImageFilter< OutputImageType, LabelImageType > ThresholdFilterType;
+typedef itk::VotingBinaryIterativeHoleFillingImageFilter< LabelImageType > HoleFilterType;
+typedef CenterlineGraphConverter<LabelType, RealType, Dimension> ConverterType;
+typedef itk::BinaryThinningImageFilter3D< LabelImageType, LabelImageType> ThinningFilterType;
+typedef itk::SignedMaurerDistanceMapImageFilter< LabelImageType, OutputImageType > DistanceFilterType;
+
+int main(int argc, char ** argv)
+{
+
+    std::cout << "Vessel Segmenter using Vesselness with Thresholding" << std::endl;
+    if(argc != 13)
+    {
+        std::cout << "Wrong Number of Parameters" << std::endl;
+        return 0;
+    }
+
+    std::string inputName = std::string(argv[1]);
+    std::string outputName = std::string(argv[2]);
+    RealType startRadius = atof(argv[3]);
+    RealType stopRadius =  atof(argv[4]);
+    int numRadii = atoi(argv[5]);
+    RealType intensityMin = atof(argv[6]);
+    RealType intensityMax = atof(argv[7]);
+    RealType vesselnessAlpha = atof(argv[8]);
+    RealType vesselnessBeta = atof(argv[9]);
+    RealType vesselnessGamma = atof(argv[10]);
+    RealType vesselnessThreshold = atof(argv[11]);
+    int unconnectedSegments = atoi(argv[12]);
+
+
+
+
+    //Set up reader and read input
+    typedef itk::ImageFileReader< InputImageType > ImageReaderType;
+    ImageReaderType::Pointer   reader = ImageReaderType::New();
+    reader->SetFileName( inputName ); 
+    reader->Update();
+    InputImageType::Pointer inputImage = reader->GetOutput();
+
+    //Set up readers and writers
+    typedef itk::ImageFileWriter< OutputImageType >  OutputImageWriterType;
+    OutputImageWriterType::Pointer outputWriter = OutputImageWriterType::New();
+       
+    typedef itk::ImageFileWriter< LabelImageType >  LabelImageWriterType;
+    LabelImageWriterType::Pointer labelWriter = LabelImageWriterType::New();
+    
+    
+    std::string inputName2 = std::string(argv[2]);
+    inputName2.insert(inputName2.find_first_of("."),"Input");
+    outputWriter->SetFileName( inputName2.c_str() );
+    outputWriter->SetInput( inputImage );
+    outputWriter->Update();
+
+
+    //timing parameters
+    clock_t t1;
+    clock_t t2;
+    
+    //Create scales
+    ObjectnessFilterType::Pointer objectnessFilter = ObjectnessFilterType::New();
+    objectnessFilter->SetScaleObjectnessMeasure(false);
+    objectnessFilter->SetBrightObject(true);
+    objectnessFilter->SetAlpha(vesselnessAlpha);
+    objectnessFilter->SetBeta(vesselnessBeta);
+    objectnessFilter->SetGamma(vesselnessGamma);
+    objectnessFilter->SetObjectDimension(1);
+    
+    MultiScaleEnhancementFilterType::Pointer multiScaleEnhancementFilter = MultiScaleEnhancementFilterType::New();
+    multiScaleEnhancementFilter->SetInput(inputImage);
+    multiScaleEnhancementFilter->SetSigmaMinimum(startRadius);
+    multiScaleEnhancementFilter->SetSigmaMaximum(stopRadius);
+    multiScaleEnhancementFilter->SetNumberOfSigmaSteps(numRadii);
+    multiScaleEnhancementFilter->SetHessianToMeasureFilter(objectnessFilter);
+    
+    //std::cout << multiScaleEnhancementFilter << std::endl;
+    //std::cout << objectnessFilter << std::endl;
+    
+    std::cout << "Vesselness computation "<< std::endl;
+    t1 = clock(); 
+    multiScaleEnhancementFilter->Update();
+    t2 = clock(); 
+    std::cout << "Vesselness time "<< t2-t1 << std::endl;
+    OutputImageType::Pointer vesselnessImage = multiScaleEnhancementFilter->GetOutput();
+    std::string vesselnessName = std::string(argv[2]);
+    vesselnessName.insert(vesselnessName.find_first_of("."),"Vesselness");
+    outputWriter->SetFileName( vesselnessName.c_str() );
+    outputWriter->SetInput( vesselnessImage );
+    outputWriter->Update();
+    
+    //Get Filters readiy
+   
+ 
+    HoleFilterType::Pointer holeFilter = HoleFilterType::New();
+    holeFilter->SetBackgroundValue(   0 );
+    holeFilter->SetForegroundValue( 1 );
+    holeFilter->SetMaximumNumberOfIterations( 20 );
+    holeFilter->SetMajorityThreshold( 0 );
+
+    ThresholdFilterType::Pointer thresholdFilter = ThresholdFilterType::New();
+    thresholdFilter->SetLowerThreshold(vesselnessThreshold);
+    thresholdFilter->SetUpperThreshold(1.0);
+    thresholdFilter->SetInsideValue(1);
+    thresholdFilter->SetOutsideValue(0);
+    
+    
+    //Insert threshold
+    thresholdFilter->SetInput(vesselnessImage);
+    thresholdFilter->Update();
+    LabelImageType::Pointer thresholdedImage = thresholdFilter->GetOutput();
+    
+    //Do hole fill
+    holeFilter->SetInput(thresholdedImage);
+    holeFilter->Update();
+    LabelImageType::Pointer holeFilledImage = holeFilter->GetOutput();
+    std::string holeFilledName = std::string(argv[2]);
+    holeFilledName.insert(holeFilledName.find_first_of("."),"HoleFilled");
+    labelWriter->SetFileName( holeFilledName.c_str() );
+    labelWriter->SetInput( holeFilledImage );
+    labelWriter->Update();
+    
+    ThinningFilterType::Pointer thinningFilter = ThinningFilterType::New();
+    thinningFilter->SetInput(holeFilledImage);
+    thinningFilter->Update();
+    LabelImageType::Pointer centerlineImage = thinningFilter->GetOutput();
+    std::string centerlineName = std::string(argv[2]);
+    centerlineName.insert(centerlineName.find_first_of("."),"Centerline");
+    labelWriter->SetFileName( centerlineName.c_str() );
+    labelWriter->SetInput( centerlineImage );
+    labelWriter->Update();
+    
+    
+    DistanceFilterType::Pointer distanceFilter = DistanceFilterType::New();
+    distanceFilter->SetInput(holeFilledImage);
+    distanceFilter->SetSquaredDistance(true);
+    distanceFilter->SetUseImageSpacing(true);
+    distanceFilter->Update();
+    OutputImageType::Pointer radiusImage = distanceFilter->GetOutput();
+    std::string radiusName = std::string(argv[2]);
+    radiusName.insert(radiusName.find_first_of("."),"Radius");
+    outputWriter->SetFileName( radiusName.c_str() );
+    outputWriter->SetInput( radiusImage );
+    outputWriter->Update();
+    
+
+
+    std::cout << "Build Vessel Network" << std::endl;
+    std::cout.flush();
+    t1 = clock();
+    ConverterType converter;
+    ConverterType::VesselGraphType vesselGraph = converter.ImageToGraph(holeFilledImage);
+    vesselGraph.RemoveUnconnectedSegments(unconnectedSegments);  
+    vesselGraph = vesselGraph.RemoveRedundentJunctions();
+    t2 = clock(); 
+    std::cout << "Build Vessel Network time "<< t2-t1 << std::endl;
+ 
+    std::ofstream outputFile;
+    std::string outputFileName(outputName.c_str(), outputName.find_first_of("."));
+    outputFileName.append(".vessel");
+    outputFile.open( outputFileName.c_str(), std::ios::out);
+    outputFile << vesselGraph;
+    outputFile.close();
+    
+    std::ofstream outputGMLFile;
+    std::string graphGMLName(outputName.c_str(), outputName.find_first_of("."));
+    graphGMLName.append(".gml");
+    outputGMLFile.open( graphGMLName.c_str(), std::ios::out);
+    vesselGraph.WriteGML(outputGMLFile);
+    outputGMLFile.close();
+    
+    std::ofstream pythonFile;
+    std::string pythonFileName(outputName.c_str(), outputName.find_first_of("."));
+    pythonFileName.append("Metrics.py");
+    pythonFile.open( pythonFileName.c_str(), std::ios::out);
+    vesselGraph.ReportMetricsAsPython(pythonFile);
+    pythonFile.close();
+ 
+   
+    std::cout << "Build Interpolated Graph" << std::endl;
+    std::cout.flush();
+    t1 = clock();
+    ConverterType::VesselGraphType interpGraph = vesselGraph.Interpolate(4);
+    t2 = clock(); 
+    std::cout << "Build Interpolated Network time "<< t2-t1 << std::endl;
+ 
+    std::string outputFileSubGraphName(outputName.c_str(), outputName.find_first_of("."));
+    outputFileSubGraphName.append("Interp.vessel");
+    outputFile.open( outputFileSubGraphName.c_str(), std::ios::out);
+    outputFile << interpGraph;
+    outputFile.close();
+    
+    
+    
+    std::cout << "Build Label Map from Graph" << std::endl;
+    std::cout.flush();
+    t1 = clock();
+    LabelImageType::Pointer upSampledImage = LabelImageType::New();
+    upSampledImage->CopyInformation(inputImage);
+    LabelImageType::RegionType upSampledRegion = inputImage->GetLargestPossibleRegion();
+    LabelImageType::SpacingType upSampledSpacing = inputImage->GetSpacing();
+    for(unsigned int i = 0; i < 3; i++)
+    {
+        upSampledRegion.SetSize(i, 1*upSampledRegion.GetSize(i));
+        upSampledSpacing[i] = upSampledSpacing[i]/1.0;
+    }
+    
+    upSampledImage->SetSpacing(upSampledSpacing);
+    upSampledImage->SetRegions( upSampledRegion );
+    upSampledImage->SetRequestedRegionToLargestPossibleRegion();
+    upSampledImage->Allocate(); 
+    upSampledImage->FillBuffer(0);
+    InputImageType::Pointer fromGraphImage = converter.GraphToImage(upSampledImage, 1, interpGraph);
+    t2 = clock(); 
+    std::cout << "Build Label Map from Graph time "<< t2-t1 << std::endl;
+       
+    std::string fromGraphName = std::string(argv[2]);
+    fromGraphName.insert(fromGraphName.find_first_of("."),"FromGraph");
+    outputWriter->SetFileName( fromGraphName.c_str() );
+    outputWriter->SetInput( fromGraphImage );
+    outputWriter->Update();
+
+   
+    return 0;
+}
